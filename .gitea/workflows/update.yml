@@ -1,0 +1,88 @@
+name: Auto Update Helium Browser Template
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-template:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y curl jq
+
+      - name: Fetch Latest Release
+        id: get_release
+        run: |
+          RELEASES=$(curl -s https://api.github.com/repos/imputnet/helium-linux/releases?per_page=50)
+          TAG=$(echo "$RELEASES" | jq -r '[.[] | select(.prerelease == false)] | sort_by(.published_at) | reverse | .[0].tag_name')
+          if [[ -z "$TAG" || "$TAG" == "null" ]]; then
+            echo "No release found"
+            exit 0
+          fi
+
+          X86_URL=$(echo "$RELEASES" | jq -r "[.[] | select(.tag_name == \"$TAG\")] | .[0].assets[] | select(.name == \"helium-${TAG}-x86_64_linux.tar.xz\") | .browser_download_url")
+          AARCH64_URL=$(echo "$RELEASES" | jq -r "[.[] | select(.tag_name == \"$TAG\")] | .[0].assets[] | select(.name == \"helium-${TAG}-arm64_linux.tar.xz\") | .browser_download_url")
+
+          if [[ -z "$X86_URL" || "$X86_URL" == "null" ]]; then
+            echo "No x86_64 tarball found for $TAG"
+            exit 0
+          fi
+
+          echo "version=$TAG" >> $GITHUB_OUTPUT
+          echo "x86_url=$X86_URL" >> $GITHUB_OUTPUT
+          echo "aarch64_url=$AARCH64_URL" >> $GITHUB_OUTPUT
+
+      - name: Read Current Version
+        if: steps.get_release.outputs.version
+        id: check_version
+        run: |
+          CURRENT=$(grep '^version=' template | cut -d= -f2)
+          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
+
+      - name: Download and Checksum
+        if: steps.get_release.outputs.version && steps.get_release.outputs.version != steps.check_version.outputs.current_version
+        id: download
+        run: |
+          curl -Lo helium-x86_64.tar.xz "${{ steps.get_release.outputs.x86_url }}"
+          echo "x86_sha256=$(sha256sum helium-x86_64.tar.xz | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+          if [[ -n "${{ steps.get_release.outputs.aarch64_url }}" && "${{ steps.get_release.outputs.aarch64_url }}" != "null" ]]; then
+            curl -Lo helium-arm64.tar.xz "${{ steps.get_release.outputs.aarch64_url }}"
+            echo "aarch64_sha256=$(sha256sum helium-arm64.tar.xz | awk '{print $1}')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Template
+        if: steps.get_release.outputs.version && steps.get_release.outputs.version != steps.check_version.outputs.current_version
+        run: |
+          sed -i \
+            -e "s/^version=.*/version=${{ steps.get_release.outputs.version }}/" \
+            -e "s/^revision=.*/revision=1/" \
+            template
+
+          awk -v x86_sum="${{ steps.download.outputs.x86_sha256 }}" \
+              -v aarch64_sum="${{ steps.download.outputs.aarch64_sha256 }}" '
+            /^x86_64\*\)/ { in_x86=1; in_aarch64=0 }
+            /^aarch64\*\)/ { in_x86=0; in_aarch64=1 }
+            /^\*\)/ { in_x86=0; in_aarch64=0 }
+            in_x86 && /^\tchecksum=/ { sub(/checksum=.*/, "checksum=" x86_sum) }
+            in_aarch64 && /^\tchecksum=/ && aarch64_sum != "" { sub(/checksum=.*/, "checksum=" aarch64_sum) }
+            { print }
+          ' template > template.tmp && mv template.tmp template
+
+      - name: Commit and Push
+        if: steps.get_release.outputs.version && steps.get_release.outputs.version != steps.check_version.outputs.current_version
+        run: |
+          git config user.name "Wizzard"
+          git config user.email "insanity9999999999@gmail.com"
+          git add template
+          if ! git diff --cached --quiet; then
+            git commit -m "Update to v${{ steps.get_release.outputs.version }} [auto]"
+            git pull --rebase origin master
+            git push
+          fi
