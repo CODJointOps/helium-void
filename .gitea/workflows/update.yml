@@ -23,7 +23,7 @@ jobs:
           TAG=$(echo "$RELEASES" | jq -r '[.[] | select(.draft == false and .prerelease == false)] | sort_by((.tag_name | sub("^[^0-9]*";"") | split("-") | .[0] | [scan("[0-9]+")] | map(tonumber)), (.tag_name | sub("^[^0-9]*";"") | split("-") | .[1:] | join(".") | [scan("[0-9]+")] | map(tonumber)), .published_at) | last | .tag_name')
           if [[ -z "$TAG" || "$TAG" == "null" ]]; then
             echo "No release found"
-            exit 0
+            exit 1
           fi
 
           X86_URL=$(echo "$RELEASES" | jq -r "[.[] | select(.tag_name == \"$TAG\")] | .[0].assets[] | select(.name == \"helium-${TAG}-x86_64_linux.tar.xz\") | .browser_download_url")
@@ -31,7 +31,7 @@ jobs:
 
           if [[ -z "$X86_URL" || "$X86_URL" == "null" ]]; then
             echo "No x86_64 tarball found for $TAG"
-            exit 0
+            exit 1
           fi
 
           echo "version=$TAG" >> $GITHUB_OUTPUT
